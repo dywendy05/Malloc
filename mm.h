@@ -28,12 +28,12 @@ extern int mm_init(void);
 extern void mm_checkheap(int verbose);
 
 /* Static helper functions */
-static inline unsigned int list(size_t size);
-static inline void * search(size_t size);
+static inline int list(size_t size);
+//static inline void * search(size_t size);
 static inline void *extend(size_t min_size);
-static inline void delete(void *ptr);
+static inline void delete_free_blk(void *ptr);
 static inline void insert(void *ptr, size_t size);
-static inline void allocate(void *ptr, size_t size); 
-static void coalesce(void *ptr);
-static void print_free_list(unsigned int i);
+//static inline void allocate(void *ptr, size_t size); 
+static void *coalesce(void *ptr);
+static void print_free_list();
 #endif
