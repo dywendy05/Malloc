@@ -1,15 +1,22 @@
 /*
  * mm.c
  *
- Segregated(16 segs in total), first fit, double linked, FIFO;
-    Each list has a root and a tail which points to the last free block;
- Seg cuts: 2^4 - 2^5, 2^5 - 2^6, 2^6 - 2^7, 2^7 - 2^8, 2^8 - 2^9, 2^9 - 2^10,
-           2^10 - 2^11, 2^11 - 2^12, 2^12 - 2^13, 2^13 - 2^14, 2^14 - 2^15, 
-           2^15 - 2^16, 2^16 - 2^17, 2^17 - 2^18, 2^18 - 2^19, 2^19-;
- Free blocks: header, next_ptr, prev_next, footer; 
-    headers and footers contain sizes only.
+ Segregated(16 segs in total), first fit, double linked, FIFO,
+           minimum block size is 8; 
+           Each list has a root and a tail which points to the last free block;
+ Seg cuts: 8, 2^4 - 2^5, 2^5 - 2^6, 2^6 - 2^7, 2^7 - 2^8, 2^8 - 2^9, 
+           2^9 - 2^10, 2^10 - 2^11, 2^11 - 2^12, 2^12 - 2^13, 2^13 - 2^14,
+           2^14 - 2^15, 2^15 - 2^16, 2^16 - 2^17, 2^17 - 2^18, 2^18 -;
+ Free blocks: 1. For blocks whose size > 8: 
+                 header, next_ptr, prev_next, footer; 
+                 headers and footers contain sizes only.
+              2. For blocks whose size == 8:
+                 prev_next, next_ptr;
+                 each ptr contains both pointer and a MBLK_BIT, 
+                 which is xxx...x100;
  Alloctedd blocks: header + effcient data; 
-    headers: size + alloc. bit of the prev. blk + alloc bit of this block;
+            headers: size + MBLK_BIT + alloc. bit of the prev. blk + 
+                     alloc bit of this block;
 */
 
 #include <assert.h>
@@ -46,42 +53,45 @@
 #endif /* def DRIVER */
 
 
-#define max(a, b) (((a) < (b)) ? (b) : (a))
-#define min(a, b) (((a) < (b)) ? (a) : (b))
+//#define max(a, b) (((a) < (b)) ? (b) : (a))
+//#define min(a, b) (((a) < (b)) ? (a) : (b))
 
 
 /* Alignment */
 #define ALIGN(sz, n) (((sz) % (n)) ? (((size_t)((sz)/(n)) + 1) * (n)) : (sz))
 
-/* Minimal block size and cut-off point to devide*/
-#define MIN_BLK 16
-#define DEVIDE_CUT 16
+/* Minimal block and cut-off point to devide*/
+#define MIN_BLK 1
+#define BIG_BLK 0
+#define DEVIDE_CUT 8
 /* Define Macros */
 #define WSIZE 4   /* Word and header/footer size (bytes) */
 #define DSIZE 8   /* Double word size(bytes) */
 
-/* Read and write and a word at address p */
+/* Read and write a word at address p */
 #define GET(p) (*(unsigned int *)(p))
 #define PUT(p, sz) (*(unsigned int *)(p)= (sz))
-// Pack of size, allocate bits for the previous block and this block;
-#define PUT_ALL(p, sz, prev, alloc) (PUT((p), ((sz) + 2 * (prev) + (alloc))))
+// Pack of size, min bit, allocate bits for the previous block and this block;
+#define PUT_ALL(p, sz, prev, alloc) (((sz) > 8) ? PUT((p), ((sz) + 2*(prev) + \
+                    alloc)): PUT((p), ((sz) + 2 * (prev) + alloc + 4)))
 
 /* Given block ptr bp, compute address of its hd, ft and adjacent blocks */
 #define HDRP(bp) ((char *)(bp) - WSIZE)
-#define GET_SIZE(p) (GET(HDRP(p)) & ~7)
-/* For free blocks only */
+#define GET_SIZE(p) ((GET(HDRP(p)) & 4) ? 8 : (GET(HDRP(p)) & ~7))
+/* For free blocks whose size > 8 only */
 #define FTRP(bp) ((char *)(bp) + GET_SIZE(bp) - DSIZE)
 
 #define NEXT_BLK(bp) ((char *)(bp) + GET_SIZE(bp))
 /* CAUTION! Only works when the previous block is free! */
-#define PREV_BLK(bp) ((char *)(bp) - (GET((char *)(bp) - DSIZE) & ~7))
+#define PREV_BLK(bp) ((GET((char *)(bp) - DSIZE) & 4) ? ((char *)(bp) - 8) : \
+                      (char *)(bp) - (GET((char *)(bp) - DSIZE) & ~7))
 
 /* Get the allocate bits of the current block and the adjacent blocks */
 #define ALLOC(p) (GET(HDRP(p)) & 1)
 #define PREV_ALLOC(p) ((GET(HDRP(p)) >> 1)  & 1)
-#define NEXT_ALLOC(p)(GET(HDRP((char *)(p) + GET_SIZE(p))) & 1)
-#define PUT_ALLOC(p, alloc) ((alloc) ? PUT(HDRP(p), GET(HDPR(p)) | 1) :  \
-                             PUT(HDRP(p), GET(HDRP(p)) & ~1)) 
+#define MBLK_BIT(p) ((GET(HDRP(p)) >> 2) & 1)
+#define NEXT_ALLOC(p) (ALLOC(NEXT_BLK(p)))
+#define PUT_ALLOC(p, alloc) ((alloc) ? PUT(p, GET(p) | 1) : PUT(p, GET(p) & ~1)) 
 //Only for allocated blocks; 
 #define PUT_PREV_ALLOC(p, prev) ((prev) ? PUT(HDRP(p), GET(HDRP(p)) | 2) : \
                                  PUT(HDRP(p), GET(HDRP(p)) & ~2))
@@ -89,26 +99,30 @@
 /* Macros for Prologue, Epilogue and start pointers of each free_list  */
 #define SEG_NUM 16
 #define SEG_SIZE DSIZE
-#define LAUNCH_SIZE ((SEG_NUM) * SEG_SIZE + 2 * WSIZE )
-#define PROLOGUE (mem_heap_lo())
-#define FIRST_BLK ((void *)(char *)(PROLOGUE) + (SEG_NUM) * SEG_SIZE + 2 * WSIZE)
+#define PAD DSIZE 
+#define LAUNCH_SIZE ((SEG_NUM) * SEG_SIZE + 2 * WSIZE + (PAD))
+#define PROLOGUE (void *)((char *)(mem_heap_lo()) + (SEG_NUM)*SEG_SIZE + (PAD))
+#define FIRST_BLK ((void *)(char *)(PROLOGUE) + DSIZE)
 #define EPILOGUE ((void *)((char *)(mem_heap_hi()) + 1 - WSIZE))
 /* i is index of the free lists: 0, 1, 2 ...*/
-#define GET_PTR(p) (((*(unsigned int *)(p)) == 0) ? ((void *)NULL) : \
-                    ((void *)((*(unsigned int *)(p)) | 0x800000000)))
-#define PUT_PTR(p, ptr) ((*(unsigned int *)(p)) = (unsigned int)((size_t)(ptr)))
-#define LIST_HEAD(i) ((void *)((char *)(PROLOGUE) + WSIZE + (i) * SEG_SIZE)) 
-#define LIST_TAIL(i) ((void *)((char *)(PROLOGUE) + DSIZE + (i) * SEG_SIZE)) 
+#define GET_PTR(p) (((*(unsigned int *)(p)) < 8) ? ((void *)NULL) : \
+                    ((void *)(((*(unsigned int *)(p) & ~7)) | 0x800000000)))
+#define PUT_PTR(p, ptr, min) ((*(unsigned int *)(p)) = \
+                              (unsigned int)((size_t)(ptr) + 4 * (min)))
+#define LIST_HEAD(i) ((void *)((char *)(mem_heap_lo()) + PAD + (i)*SEG_SIZE)) 
+#define LIST_TAIL(i) ((void *)((char *)LIST_HEAD(i) + WSIZE)) 
 #define GET_HEAD(i) GET_PTR(LIST_HEAD(i))
 #define GET_TAIL(i) GET_PTR(LIST_TAIL(i))
-#define PUT_HEAD(i, ptr) (PUT_PTR(LIST_HEAD(i), (ptr)))
-#define PUT_TAIL(i, ptr) (PUT_PTR(LIST_TAIL(i), (ptr)))
+#define PUT_HEAD(i, ptr) (PUT_PTR(LIST_HEAD(i), (ptr), BIG_BLK))
+#define PUT_TAIL(i, ptr) (PUT_PTR(LIST_TAIL(i), (ptr), BIG_BLK))
 
 /* Free list pointer arithmetic */
 #define NEXT_PTR(p) (GET_PTR(p))
-#define PREV_PTR(p) (GET_PTR((char *)(p) + WSIZE))
-#define PUT_NEXT_PTR(p, ptr) (PUT_PTR((p), (ptr)))
-#define PUT_PREV_PTR(p, ptr) (PUT_PTR(((char *)(p) + WSIZE), (ptr)))
+#define PREV_PTR(p) ((GET(p) & 4) ? GET_PTR((char *)(p) - WSIZE) : \
+                      GET_PTR((char *)(p) + WSIZE))
+#define PUT_NEXT_PTR(p, ptr, min) (PUT_PTR((p), (ptr), min))
+#define PUT_PREV_PTR(p, ptr, min) ((min) ? PUT_PTR(((char *)(p) - WSIZE), \
+                    (ptr), 1) : PUT_PTR(((char *)(p) + WSIZE), (ptr), 0))
 
 /* Static helper functions */
 
@@ -120,20 +134,21 @@ int mm_init(void) {
     if((mem_sbrk(mem_pagesize())) == (void *)-1)
         return -1;
 
-    void *root = (void *)((char *)PROLOGUE + WSIZE);
+    void *start = (void *)((char *)(mem_heap_lo() + PAD));
     for(int i = 0; i < SEG_NUM; ++i) {
-        PUT_PTR(root,  NULL);
-        PUT_PTR((char *)root + WSIZE, root);
-        root = (void *)((char *)root + SEG_SIZE);
+        PUT_PTR(start,  NULL, 0);
+        PUT_PTR((char *)start + WSIZE, start, 0);
+        start = (void *)((char *)start + SEG_SIZE);
     }
     
 	size_t size = mem_pagesize() - LAUNCH_SIZE;
-    void *start_ptr = FIRST_BLK;
+    start = (void *)((char *)start + DSIZE);
 
-	PUT(HDRP(start_ptr), size);
-    PUT(FTRP(start_ptr), size);
+	PUT(HDRP(start), size);
+    PUT(FTRP(start), size);
 
-	insert(start_ptr, size);
+    dbg_print_free_list();
+	insert(start, size);
 	
     PUT(PROLOGUE, 1);
     PUT(EPILOGUE, 1);
@@ -150,7 +165,7 @@ int mm_init(void) {
  */
 void *malloc (size_t size) 
 {
-	dbg_printf("\nMalloc: size is 0x%lx \n", size);
+	dbg_printf("\nMalloc: size is 0x%lx,\n", size);
     dbg_printf("PROLOGUE is %p (0x%x), Epilogue is %p (0x%x), heap_hi is %p\n" 
 	           , PROLOGUE, GET(PROLOGUE),  EPILOGUE, GET(EPILOGUE), 
 				mem_heap_hi());
@@ -158,15 +173,15 @@ void *malloc (size_t size)
         return NULL;
     if(size == 0) return NULL ;
 
-    size = max(ALIGN(size + WSIZE, 8), MIN_BLK); //Header takse a word size;
+    size = ALIGN(size + WSIZE, 8); //Header takse a word size;
 
     /* Search Policy: first fit from the right list*/
-	dbg_printf("size is now 0x%lx, list index is %d \n", size, list(size));
+	dbg_printf("size is 0x%lx, list index is %d \n", size, list(size));
 
 	void *p = NULL;
 	for(int i = list(size); i < SEG_NUM; ++i) {
         p = GET_HEAD(i);
-        dbg_printf("i is %d, root is %p( %p)\n", i,LIST_HEAD(i), GET_HEAD(i)); 
+  //    dbg_printf("i is %d, root is %p( %p)\n", i,LIST_HEAD(i), GET_HEAD(i)); 
         while(p != NULL) {
 	        if(GET_SIZE(p) >= size)
                 break;
@@ -175,7 +190,7 @@ void *malloc (size_t size)
         if(p != NULL)
             break;
 	}
-    dbg_printf("Searched p is %p\n", p);
+    dbg_printf("brk1\n");
     /* If available free block NOT found, ask for extra heap */
     if(p == NULL) {
 		if((p = extend(size)) == NULL)
@@ -183,12 +198,14 @@ void *malloc (size_t size)
 //        dbg_print_free_list();
 	}
     
+    dbg_printf("Searched p is %p(HD: 0x%x\n", p, GET(HDRP(p)));
+
 	delete_free_blk(p);
 
     /* Allocate the found free block */	
     size_t bsize = GET_SIZE(p), rmsize = bsize - size;
 
-    void *next;
+    void *next; 
     if(rmsize > DEVIDE_CUT) {
         PUT_ALL(HDRP(p), size, 1, 1);
         next = (void *)((char *)p + size);
@@ -201,7 +218,8 @@ void *malloc (size_t size)
         next = (void *)((char *)p + bsize);
         PUT_PREV_ALLOC(next, 1);
     }
-
+    
+    dbg_printf("size is 0x%x, p is %p(HD: 0x%x)\n", size, p, GET(HDRP(p)));
 	return p;
 }
 
@@ -237,11 +255,11 @@ void *realloc(void *ptr, size_t size)
 		return NULL;	
 	}
 	
-	size = max(ALIGN(size + WSIZE, DSIZE), MIN_BLK);
+	size = ALIGN(size + WSIZE, DSIZE);
 	size_t oldsize = GET_SIZE(ptr);
     void *next;
 	if(size <= oldsize) { 
-        size_t rmsize = oldsize - size;
+/*        size_t rmsize = oldsize - size;
         if(rmsize > DEVIDE_CUT) {
             PUT(HDRP(ptr), (GET(HDRP(ptr)) - rmsize));
             next = (void *)((char *)ptr + size);
@@ -250,10 +268,11 @@ void *realloc(void *ptr, size_t size)
             insert(next, rmsize);
             PUT_PREV_ALLOC((char *)(ptr) + oldsize, 0);
         }
+*/
         return ptr;
     }
 
-    next = NEXT_BLK(ptr);
+/*  next = NEXT_BLK(ptr);
     if(!ALLOC(next) && (oldsize + GET_SIZE(next) >= size)) {
         delete_free_blk(next);
 
@@ -272,6 +291,7 @@ void *realloc(void *ptr, size_t size)
         }
         return ptr;
     } 
+*/
 
 	void *newptr;
 	if((newptr = malloc(size)) == NULL)
@@ -330,12 +350,13 @@ static inline void delete_free_blk(void *ptr)
 {
 	dbg_printf("\nIn delete, ptr is %p(HD: 0x%x)\n", ptr, GET(HDRP(ptr)));
 
+    int min = (GET_SIZE(ptr) == 8) ? 1 : 0;
 	void *prev = PREV_PTR(ptr);
 	void *next = NEXT_PTR(ptr);
     
-    PUT_NEXT_PTR(prev, next);
+    PUT_NEXT_PTR(prev, next, min);
 	if(next != NULL) 
-		PUT_PREV_PTR(next, prev);
+		PUT_PREV_PTR(next, prev, min);
     else {
         int i = list(GET_SIZE(ptr));
         PUT_TAIL(i, prev);
@@ -347,13 +368,17 @@ static inline void delete_free_blk(void *ptr)
 /* Insert policy: insert into the end*/
 static inline void insert(void *ptr, size_t size)
 {
-	dbg_printf("\nIn insert, ptr is %p(HD: 0x%x)\n", ptr, GET(HDRP(ptr)));
 	unsigned int i = list(size);
+	dbg_printf("\nIn insert, ptr is %p(HD: 0x%x), list index is: %d\n", 
+               ptr, GET(HDRP(ptr)), i);
+    int min = (i == 0) ? 1 : 0;
 	void *tail = GET_TAIL(i);
-    PUT_NEXT_PTR(tail, ptr);
-    PUT_PREV_PTR(ptr, tail);
-    PUT_NEXT_PTR(ptr, NULL);
+    PUT_NEXT_PTR(tail, ptr, min);
+    PUT_PREV_PTR(ptr, tail, min);
+    PUT_NEXT_PTR(ptr, NULL, min);
     PUT_TAIL(i, ptr);
+
+    dbg_print_free_list();
 	return;
 }
 
@@ -389,8 +414,10 @@ static void *coalesce(void *ptr)
 		delete_free_blk(next);
         next = NEXT_BLK(next);    
 	}
-	PUT(HDRP(ptr), size);
-	PUT(FTRP(ptr), size);
+    if(size > 8) {
+        PUT(HDRP(ptr), size);
+        PUT(FTRP(ptr), size);
+    }
     PUT_PREV_ALLOC(next, 0);
 	insert(ptr, size);
 
@@ -401,17 +428,21 @@ static void *coalesce(void *ptr)
 
 static inline int list(size_t size) 
 {
-    int b = 0, e = SEG_NUM - 1,  mid = (b + e)/2;
+    if(size < 16)
+        return 0;
+    int b = 1, e = SEG_NUM - 1,  mid = (b + e)/2;
     while(e > b ) {
-        if(size >= (1UL << (mid + 4)) && size < (1UL << (mid + 5)))
+        if(size >= (1UL << (mid + 3)) && size < (1UL << (mid + 4)))
             return mid;
-        else if(size < (1UL << (mid + 4))) 
+        else if(size < (1UL << (mid + 3))) 
             e = mid - 1;
         else 
             b = mid + 1;
 
         mid = (b + e)/2;
     }
+
+    dbg_printf("brk2\n");
     return b;
 }
 
@@ -437,7 +468,6 @@ static inline int aligned(const void *p) {
  * mm_checkhexxx */
 void mm_checkheap(int lineno) 
 {
-	printf("mm_checkheap %d\n", lineno);
     //Prologue and Epilouge;
 	if(!in_heap(PROLOGUE)) { 
         printf("Error: PROLOGUE %p(0x%x) out of heap\n", 
@@ -467,30 +497,57 @@ void mm_checkheap(int lineno)
 	while(p < EPILOGUE) {
 		if(!bounded(p)) {
 			printf("Error: %p(HD: 0x%x) out of bound\n", p, GET(HDRP(p)));
+            print_free_list();
             exit(1);
         }
 		if(!aligned(p)) {
 			printf("Error: %p(HD: 0x%x) not aligend\n", p, GET(HDRP(p)));
+            print_free_list();
             exit(1);
         }
 
 		next = NEXT_BLK(p);
         if(ALLOC(next) && ALLOC(p) != PREV_ALLOC(next)){
-            printf("Error: unmatching alloc bit of this block: %p(HD: 0x%x) and"
+            printf("Error: unmatching alloc bit of this blk: %p(HD: 0x%x) and"
                    " prev_alloc bit of next block %p(HD:0x%x)\n", 
 				   p, GET(HDRP(p)), next, GET(HDRP(next)));
+            print_free_list();
             exit(1);
         }
 
+        if(ALLOC(p) && MBLK_BIT(p) && (GET(HDRP(p)) & ~7) != 8) {
+            printf("Error: wrong size for a min. allocated blk: %p(HD: 0x%x)\n"
+                   , p, GET(HDRP(p)));
+            print_free_list();
+            exit(1);
+        }
 		if(!ALLOC(p)) {
-            if(GET(HDRP(p)) != GET(FTRP(p))) {
-                printf("Error: Header(0x%x) and footer(0x%x) of blcok %p " 
-                       "do not match\n", GET(HDRP(p)), GET(FTRP(p)), p);
-                exit(1);
-            }		
+            if(GET_SIZE(p) > 8) {
+                if(GET(HDRP(p)) != GET(FTRP(p))) {
+                    printf("Error: Header(0x%x) and footer(0x%x) of blcok %p " 
+                           "do not match\n", GET(HDRP(p)), GET(FTRP(p)), p);
+                    print_free_list();
+                    exit(1);
+                }	
+                if(MBLK_BIT(p)) {
+                    printf("Error: wrong min-bit of free block %p,(prev: %p, "
+                           "next: %p)\n", p, PREV_PTR(p), NEXT_PTR(p));
+                    print_free_list();
+                    exit(1);
+                }
+            }
+            else {
+                if(!MBLK_BIT(p) || !MBLK_BIT((char *)p + WSIZE)) {
+                    printf("Error: wrong min-bit of free block %p,(prev: %p, "
+                           "next: %p)\n", p, PREV_PTR(p), NEXT_PTR(p));
+                    print_free_list();
+                    exit(1);
+                }           
+            }
             if(!ALLOC(next)) {
                 printf("Error: adjacent free blocks: %p(HD: 0x%x) and %p"
                         "(HD: 0x%x)\n", p, GET(HDRP(p)), next, GET(HDRP(next)));
+                print_free_list();
                 exit(1);
             }
 
@@ -506,12 +563,6 @@ void mm_checkheap(int lineno)
         prev = LIST_HEAD(i);
 	    p = GET_HEAD(i);
 
-		if(!bounded(prev)) {
-			printf("Error: root %p( %p) of list %d is out of bound\n", 
-					prev, p, i);
-			print_free_list();
-            exit(1);
-		}		
 		while(p != NULL) {
 			if(!bounded(p)) {
 				printf("Error: %p(HD: 0x%x) of list %d is out of bound\n",
@@ -563,10 +614,13 @@ void mm_checkheap(int lineno)
 
 static void print_free_list()
 {
+    dbg_printf("PROLOGUE is %p (0x%x), Epilogue is %p (0x%x), heap_hi is %p\n",
+                PROLOGUE, GET(PROLOGUE),  EPILOGUE, GET(EPILOGUE), 
+                mem_heap_hi());
 	void *p;
     for(int i = 0; i < SEG_NUM; ++i) {
-	    printf("Root of free list %d is: %p ( %p)\n", 
-                i, LIST_HEAD(i), GET_HEAD(i));
+	    printf("Root of free list %d is %p( %p), and tail is %p( %p)\n", 
+                i, LIST_HEAD(i), GET_HEAD(i), LIST_TAIL(i), GET_TAIL(i));
 
 		p = GET_HEAD(i);
 		while(p != NULL) {
