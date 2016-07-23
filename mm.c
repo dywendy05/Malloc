@@ -1,12 +1,16 @@
 /*
  * mm.c
  *
- 1. Best fit, double linked, only one free list;
- 2. Free blocks: header, next_ptr, prev_next, footer; 
-            headers and footers contain sizes only.
- 3. Alloctedd blocks: header + effcient data; 
-            headers: size + alloc. bit of the prev. blk + 
-            alloc bit of this block;
+ 1. Best fit, double linked, only one free list, which has a root(one word size)
+        that points to the first block, and the prev_ptr of the first block
+        points to its root;
+ 2. Free blocks: header, next_ptr, prev_next, footer (each takes a word size); 
+        headers and footers contain block sizes only.
+ 3. Alloctedd blocks: header + allocted data; 
+        headers: blk size + alloc. bit of the prev. blk + alloc bit of this blk;
+ 4. Extend policy: extend multiples of 1/4 of a page size on heap requests;
+ 5. Graph of heap structure (Prologue and Epilogue both take one word size):
+        PROLOGUE, root, a word size pad, 1st block, ..., last block, EPILOGUE;
 */
 
 #include <assert.h>
@@ -102,6 +106,9 @@
 #define PUT_NEXT_PTR(p, ptr) (PUT_PTR((p), (ptr)))
 #define PUT_PREV_PTR(p, ptr) (PUT_PTR(((char *)(p) + WSIZE), (ptr)))
 
+/* Extend multiples of EXTEND_SIZE on heap requests*/
+#define EXTEND_SIZE (mem_pagesize() / 4)
+
 /* Static helper functions */
 
 /*
@@ -109,13 +116,13 @@
  */
 int mm_init(void) {
     dbg_printf("\n\nmm_init called \n");
-    if((mem_sbrk(mem_pagesize())) == (void *)-1)
+    if((mem_sbrk(EXTEND_SIZE)) == (void *)-1)
         return -1;
 
     PUT_HEAD(NULL);
 
     dbg_print_free_list();
-	size_t size = mem_pagesize() - LAUNCH_SIZE;
+	size_t size = EXTEND_SIZE - LAUNCH_SIZE;
     void *start_ptr = FIRST_BLK;
 
 	PUT(HDRP(start_ptr), size);
@@ -163,7 +170,6 @@ void *malloc (size_t size)
     if(p == NULL) {
 		if((p = extend(size)) == NULL)
 			return NULL;
-//        dbg_print_free_list();
 	}
     
 	delete_free_blk(p);
@@ -284,7 +290,7 @@ void *calloc (size_t nmemb, size_t size) {
 /* Extend policy: mutilples of page size each time */
 static inline void *extend(size_t size)
 {
-    size = ALIGN(size, mem_pagesize());
+    size = ALIGN(size, EXTEND_SIZE);
 
 	dbg_printf("The size to extend is 0x%x\n", size);
 
@@ -330,7 +336,6 @@ static inline void insert(void *ptr, size_t size)
         prev = p;
         p = NEXT_PTR(p);
     }
-    dbg_printf("brk3\n");
 
     PUT_NEXT_PTR(prev, ptr);
     PUT_PREV_PTR(ptr, prev);
