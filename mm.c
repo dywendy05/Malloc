@@ -1,7 +1,7 @@
 /*
  * mm.c
  *
- Segregated(16 segs in total), first fit, double linked, FIFO;
+ Segregated(16 segs in total), best fit, double linked, FIFO;
     Each list has a root and a tail which points to the last free block;
  Seg cuts: 2^4 - 2^5, 2^5 - 2^6, 2^6 - 2^7, 2^7 - 2^8, 2^8 - 2^9, 2^9 - 2^10,
            2^10 - 2^11, 2^11 - 2^12, 2^12 - 2^13, 2^13 - 2^14, 2^14 - 2^15, 
@@ -88,7 +88,7 @@
 
 /* Macros for Prologue, Epilogue and start pointers of each free_list  */
 #define SEG_NUM 16
-#define SEG_SIZE DSIZE
+#define SEG_SIZE WSIZE
 #define LAUNCH_SIZE ((SEG_NUM) * SEG_SIZE + 2 * WSIZE )
 #define PROLOGUE (mem_heap_lo())
 #define FIRST_BLK ((void *)(char *)(PROLOGUE) + (SEG_NUM) * SEG_SIZE + 2 * WSIZE)
@@ -98,11 +98,11 @@
                     ((void *)((*(unsigned int *)(p)) | 0x800000000)))
 #define PUT_PTR(p, ptr) ((*(unsigned int *)(p)) = (unsigned int)((size_t)(ptr)))
 #define LIST_HEAD(i) ((void *)((char *)(PROLOGUE) + WSIZE + (i) * SEG_SIZE)) 
-#define LIST_TAIL(i) ((void *)((char *)(PROLOGUE) + DSIZE + (i) * SEG_SIZE)) 
+//#define LIST_TAIL(i) ((void *)((char *)(PROLOGUE) + DSIZE + (i) * SEG_SIZE)) 
 #define GET_HEAD(i) GET_PTR(LIST_HEAD(i))
-#define GET_TAIL(i) GET_PTR(LIST_TAIL(i))
+//#define GET_TAIL(i) GET_PTR(LIST_TAIL(i))
 #define PUT_HEAD(i, ptr) (PUT_PTR(LIST_HEAD(i), (ptr)))
-#define PUT_TAIL(i, ptr) (PUT_PTR(LIST_TAIL(i), (ptr)))
+//#define PUT_TAIL(i, ptr) (PUT_PTR(LIST_TAIL(i), (ptr)))
 
 /* Free list pointer arithmetic */
 #define NEXT_PTR(p) (GET_PTR(p))
@@ -123,10 +123,10 @@ int mm_init(void) {
     void *root = (void *)((char *)PROLOGUE + WSIZE);
     for(int i = 0; i < SEG_NUM; ++i) {
         PUT_PTR(root,  NULL);
-        PUT_PTR((char *)root + WSIZE, root);
         root = (void *)((char *)root + SEG_SIZE);
     }
     
+    dbg_print_free_list();
 	size_t size = mem_pagesize() - LAUNCH_SIZE;
     void *start_ptr = FIRST_BLK;
 
@@ -224,7 +224,7 @@ void free(void *ptr)
  */
 void *realloc(void *ptr, size_t size) 
 {
-	dbg_printf("\nRealloc: %p, size is 0x%x", ptr, (unsigned int)size);
+	dbg_printf("\nRealloc: %p, size is 0x%x\n", ptr, (unsigned int)size);
 
 	if(ptr == NULL)
 		return malloc(size);
@@ -237,10 +237,14 @@ void *realloc(void *ptr, size_t size)
 		return NULL;	
 	}
 	
-	size = max(ALIGN(size + WSIZE, DSIZE), MIN_BLK);
+   	size = max(ALIGN(size + WSIZE, DSIZE), MIN_BLK);
+    dbg_printf("size is 0x%x, ptr is %p(HD 0x%x), next blk is %p(HD 0x%x)\n",
+                size, ptr, GET(HDRP(ptr)), NEXT_BLK(ptr),
+                GET(HDRP(NEXT_BLK(ptr))));
 	size_t oldsize = GET_SIZE(ptr);
     void *next;
 	if(size <= oldsize) { 
+/*
         size_t rmsize = oldsize - size;
         if(rmsize > DEVIDE_CUT) {
             PUT(HDRP(ptr), (GET(HDRP(ptr)) - rmsize));
@@ -250,6 +254,7 @@ void *realloc(void *ptr, size_t size)
             insert(next, rmsize);
             PUT_PREV_ALLOC((char *)(ptr) + oldsize, 0);
         }
+*/
         return ptr;
     }
 
@@ -336,24 +341,36 @@ static inline void delete_free_blk(void *ptr)
     PUT_NEXT_PTR(prev, next);
 	if(next != NULL) 
 		PUT_PREV_PTR(next, prev);
-    else {
-        int i = list(GET_SIZE(ptr));
-        PUT_TAIL(i, prev);
-    }
+
     dbg_print_free_list();
 	return;
 }
 
-/* Insert policy: insert into the end*/
+/* Insert policy: insert into the place where blocks before it have smaller
+                  sizes and blocks after it have equal or greater sizes*/
 static inline void insert(void *ptr, size_t size)
 {
 	dbg_printf("\nIn insert, ptr is %p(HD: 0x%x)\n", ptr, GET(HDRP(ptr)));
 	unsigned int i = list(size);
-	void *tail = GET_TAIL(i);
-    PUT_NEXT_PTR(tail, ptr);
-    PUT_PREV_PTR(ptr, tail);
-    PUT_NEXT_PTR(ptr, NULL);
-    PUT_TAIL(i, ptr);
+	void *prev = LIST_HEAD(i);
+    void *p = GET_HEAD(i);
+
+    while(p != NULL) {
+        if(GET_SIZE(p) >=  size)
+            break;
+        prev = p;
+        p = NEXT_PTR(p);
+    }
+    dbg_printf("brk3\n");
+
+    PUT_NEXT_PTR(prev, ptr);
+    PUT_PREV_PTR(ptr, prev);
+    PUT_NEXT_PTR(ptr, p);
+
+    if(p != NULL)
+        PUT_PREV_PTR(p, ptr);
+
+    dbg_print_free_list();
 	return;
 }
 
@@ -548,6 +565,13 @@ void mm_checkheap(int lineno)
 
             prev = p;
 			p = NEXT_PTR(p);
+            if(p != NULL && GET_SIZE(prev) > GET_SIZE(p)) {
+                printf("Error: wrong order of free block %p(HD 0x%x) "
+                       "and %p(HD 0x%x)\n", prev, GET(HDRP(prev)),
+                       p, GET(HDRP(p)));
+                print_free_list();
+                exit(1);
+            }
 			++cnt2;
 		}
 	}  
