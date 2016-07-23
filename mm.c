@@ -1,15 +1,23 @@
 /*
  * mm.c
  *
- Segregated(16 segs in total), best fit, double linked, FIFO;
-    Each list has a root and a tail which points to the last free block;
+ Segregated(16 segs in total), best fit, double linked;
+    Each list has a root(which take a word size) pointing to the first block  
+    and a tail(which also takes a word size) pointing to the last block; 
+    The prev_ptr of the first block of each free list points to its root;
  Seg cuts: 2^4 - 2^5, 2^5 - 2^6, 2^6 - 2^7, 2^7 - 2^8, 2^8 - 2^9, 2^9 - 2^10,
            2^10 - 2^11, 2^11 - 2^12, 2^12 - 2^13, 2^13 - 2^14, 2^14 - 2^15, 
            2^15 - 2^16, 2^16 - 2^17, 2^17 - 2^18, 2^18 - 2^19, 2^19-;
- Free blocks: header, next_ptr, prev_next, footer; 
-    headers and footers contain sizes only.
- Alloctedd blocks: header + effcient data; 
-    headers: size + alloc. bit of the prev. blk + alloc bit of this block;
+ Free blocks: header, next_ptr, prev_next, footer (each takes a word size); 
+    headers and footers contain block sizes only.
+ Alloctedd blocks: header + allocated data; 
+    headers: blk size + alloc. bit of the prev. blk + alloc bit of this blk;
+ Extend policy: each time to extend the heap, extend multiples of EXTEND_SIZE,
+    which is 1/8 of a page size here.
+
+ Graph of heap structure(Both Prologue and Epilogue take a word size):
+    PROLOUGE, 1st root, 1st tail, ..., last root, last tail,
+    1st block, ..., last block, EPILOGUE;
 */
 
 #include <assert.h>
@@ -110,6 +118,9 @@
 #define PUT_NEXT_PTR(p, ptr) (PUT_PTR((p), (ptr)))
 #define PUT_PREV_PTR(p, ptr) (PUT_PTR(((char *)(p) + WSIZE), (ptr)))
 
+/* Each to extend the heap, extend mutiples of EXTEND_SIZE */
+#define EXTEND_SIZE (mem_pagesize() / 8)
+
 /* Static helper functions */
 
 /*
@@ -117,7 +128,7 @@
  */
 int mm_init(void) {
     dbg_printf("\n\nmm_init called \n");
-    if((mem_sbrk(mem_pagesize())) == (void *)-1)
+    if((mem_sbrk(EXTEND_SIZE)) == (void *)-1)
         return -1;
 
     void *root = (void *)((char *)PROLOGUE + WSIZE);
@@ -127,7 +138,7 @@ int mm_init(void) {
     }
     
     dbg_print_free_list();
-	size_t size = mem_pagesize() - LAUNCH_SIZE;
+	size_t size = EXTEND_SIZE - LAUNCH_SIZE;
     void *start_ptr = FIRST_BLK;
 
 	PUT(HDRP(start_ptr), size);
@@ -180,7 +191,6 @@ void *malloc (size_t size)
     if(p == NULL) {
 		if((p = extend(size)) == NULL)
 			return NULL;
-//        dbg_print_free_list();
 	}
     
 	delete_free_blk(p);
@@ -301,11 +311,11 @@ void *calloc (size_t nmemb, size_t size) {
 /* Extend policy: mutilples of page size each time */
 static inline void *extend(size_t size)
 {
-    size = ALIGN(size, mem_pagesize());
-
+    size = ALIGN(size, EXTEND_SIZE);
 	dbg_printf("The size to extend is 0x%x\n", size);
 
 	void *newptr = (void *)((char *)mem_heap_hi() + 1);
+
 	if(mem_sbrk(size) == (void *)-1)
 		return NULL;
 	
@@ -348,7 +358,6 @@ static inline void insert(void *ptr, size_t size)
         prev = p;
         p = NEXT_PTR(p);
     }
-    dbg_printf("brk3\n");
 
     PUT_NEXT_PTR(prev, ptr);
     PUT_PREV_PTR(ptr, prev);
